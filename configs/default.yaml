@@ -1,0 +1,195 @@
+# ============================================================================
+# Brivit — TORGO-only, subject-disjoint configuration (paper revision)
+#
+# Hyperparameter sources:
+#   Table 6  — patch, embed_dim, depth, heads, DropPath, optimizer, lr,
+#              batch size, weight decay, epochs, audio/spike parameters.
+#   §3.2     — LIF dynamics (tau_m, V_th, V_reset, tau_ref, dt), spike-domain
+#              post-processing (neighborhood window, density percentile).
+#   §3.1     — 7 augmentation operations.
+#   §4.1     — 7 : 2 : 1 split ratio.   (kept here for ratio; level is forced
+#              to speaker-level per revision requirements.)
+#   §4.5     — optimizer / LR chosen after sweep.
+#
+# Values marked [inferred] are not printed in the paper; they sit in config
+# so they are tunable without code edits.
+# ============================================================================
+
+experiment:
+  name: "brivit_torgo_subject_disjoint"
+  output_root: "./runs"
+  # "main" results are always subject-disjoint on TORGO. Nothing else.
+  legacy_sample_split: false          # (#15) kept as an opt-in escape hatch
+
+# ---------- Dataset ----------
+dataset:
+  name: "TORGO"
+  root: "./data/TORGO"
+  # Four class directories as provided by the Kaggle mirror:
+  # https://www.kaggle.com/datasets/pranaykoppula/torgo-audio
+  classes: ["F_Con", "F_Dys", "M_Con", "M_Dys"]
+  # Binary label: Dys=1, Con=0; gender tag is kept per sample.
+  # Gender-aware branch is now an ablation switch (#32), not the default.
+  speaker_from_path_regex: "(F|M)(C|)[0-9]+"   # see data/splits.py for parsing
+
+# ---------- Split (subject-disjoint, speaker-stratified) ----------
+split:
+  protocol: "speaker_stratified_kfold"   # (#11) default
+  # Alternatives: "leave_one_speaker_out", "sample_level_legacy"
+  k_folds: 5                             # (#11)
+  stratify_on: ["label", "gender"]       # (#12)
+  # For each fold: train/val/test by carving out a held-out speaker set as
+  # test, a disjoint val speaker set, remainder trains. (#13)
+  val_fraction_of_train: 0.2             # within each fold's non-test speakers
+  seed: 2024                             # split seed is fixed once for all runs
+  manifest_path: "splits/torgo_subject_disjoint.json"   # (#14, #47)
+
+# ---------- Audio / preprocessing (Table 6) ----------
+audio:
+  sampling_rate: 16000
+  channels: 1
+  clip_duration_s: 3.0          # [inferred] unified length
+  n_fft: 400                    # 25 ms * 16 kHz
+  win_length: 400
+  hop_length: 160               # 10 ms * 16 kHz
+  n_mels: 64
+  pcen_smoothing: 0.98
+
+spike_encoding:
+  neuron_model: "LIF"
+  tau_m_ms: 20.0
+  v_threshold: 1.0
+  v_reset: 0.0
+  tau_ref_ms: 5.0
+  dt_ms: 1.0
+  membrane_decay: 0.95
+  event_threshold: 0.2
+  neighborhood_ms: 5.0
+  min_neighbors: 2
+  density_percentile: 75.0
+  stats_window_ms: 20.0
+  stats: ["firing_rate", "first_spike_latency", "isi_mean", "isi_std", "burstiness"]
+
+feature_fusion:
+  method: "concat_linear"        # Table 6
+  init: "equal"                  # Table 6
+  out_channels: 3                # [inferred] feed pseudo-RGB into ViT patch embed
+
+# ---------- Augmentation (train split only) ----------
+augmentation:
+  enabled: true                  # (#32) ablation switch
+  probability_each: 0.5
+  waveform:
+    add_noise:     {enabled: true, snr_db_range: [10, 30]}
+    pitch_shift:   {enabled: true, semitone_range: [-2, 2]}
+    speed_perturb: {enabled: true, factor_range: [0.9, 1.1]}
+    time_shift:    {enabled: true, max_shift_ratio: 0.1}
+  spectrogram:
+    freq_mask:     {enabled: true, max_width: 15, num_masks: 2}
+    time_mask:     {enabled: true, max_width: 30, num_masks: 2}
+    time_warp:     {enabled: true, max_warp: 5}
+
+# ---------- Main model (Table 6 + §3.3) ----------
+model:
+  name: "Brivit"
+  input_size: [224, 224]
+  patch_size: 32
+  in_channels: 3
+  embed_dim: 256
+  depth: 6
+  num_heads: 8
+  mlp_ratio: 4.0
+  drop_path_rate: 0.1
+  qkv_bias: true
+  dual_channel_attention: true   # (#32) ablation switch
+  num_classes: 2
+  pretrained:
+    enabled: true
+    source: "timm:vit_base_patch32_224"
+    mode: "partial"              # (#26) "partial" or "full"; only shape-matching tensors copy
+
+# ---------- Ablation switches (#32) ----------
+ablation:
+  use_augment: true
+  use_spectral: true
+  use_spike: true
+  use_fusion: true
+  use_dual_channel_attn: true
+  use_gender_branch: false        # default OFF — one unified model on all TORGO
+
+# ---------- Training (Table 6, #22) ----------
+train:
+  optimizer: "RectifiedAdam"
+  learning_rate: 1.0e-4
+  batch_size: 16
+  weight_decay: 1.0e-4
+  epochs: 100
+  loss: "cross_entropy"
+  early_stopping:
+    enabled: true
+    monitor: "val_auc"
+    patience: 15
+    mode: "max"
+  save_best_on: "val_auc"
+  num_workers: 2
+
+# ---------- Seeds (#35-38) ----------
+seeds:
+  model_init: [0, 1, 2, 3, 4]
+  split_seed_is_fixed: true
+  deterministic: true
+
+# ---------- Baselines (#27-31) ----------
+baselines:
+  enabled: ["svm", "random_forest", "cnn2d"]
+  optional: ["crnn"]              # (#28) on/off
+  feature_mode:
+    classical: "mfcc_stats"       # MFCC mean+std+delta stats (for SVM/RF)
+    cnn: "logmel"                 # log-Mel spectrogram
+  # Validation-based decision-threshold selection for traditional baselines.
+  # Revision #4: train→fit, val→pick threshold, test→final report.
+  threshold:
+    strategy: "max_f1"            # max_f1 / max_balanced_accuracy / fixed_sensitivity
+    target_sensitivity: 0.90      # used only when strategy = fixed_sensitivity
+  svm:
+    kernel: "rbf"
+    C: 1.0
+    class_weight: "balanced"
+  random_forest:
+    n_estimators: 300
+    max_depth: null
+    class_weight: "balanced"
+  cnn2d:
+    channels: [32, 64, 128]
+    dropout: 0.3
+    lr: 1.0e-3
+    epochs: 60
+    batch_size: 32
+  crnn:
+    cnn_channels: [32, 64]
+    rnn_hidden: 128
+    lr: 1.0e-3
+    epochs: 60
+    batch_size: 32
+
+# ---------- Evaluation (#41-46) ----------
+evaluation:
+  metrics:
+    - accuracy
+    - precision
+    - recall
+    - specificity
+    - f1
+    - roc_auc
+    - pr_auc
+    - balanced_accuracy
+  calibration: ["brier", "ece"]
+  ece_bins: 10
+  confidence_intervals: 95
+  bootstrap_iters: 1000            # for CI
+
+# ---------- Statistical significance (#39-40) ----------
+statistics:
+  test: "paired_wilcoxon"          # paired over (seed, fold) pairs
+  alpha: 0.05
+  correction: "holm"               # when comparing against multiple baselines

@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brivit"
+version = "0.4.0"
+description = "Brivit — TORGO subject-disjoint reproduction"
+readme = "README.md"
+# Pinned Python range: torch 2.2.x wheels exist for 3.9-3.11.
+requires-python = ">=3.9,<3.12"
+
+# Runtime dependencies that are NOT torch itself. torch / torchaudio are
+# installed via the CPU / GPU extras below so we can pin their wheel sources.
+dependencies = [
+    "numpy>=1.24,<2.0",
+    "pandas>=2.0,<3.0",
+    "scikit-learn>=1.3,<2.0",
+    "scipy>=1.10,<2.0",
+    "pyyaml>=6.0,<7.0",
+    "timm>=0.9,<1.1",
+    "torch_optimizer>=0.3,<0.4",
+]
+
+[project.optional-dependencies]
+# --- CPU-only install.  Works on any machine, no CUDA runtime needed.
+# Pinned to a concrete 2.2.x pair because torch <-> torchaudio must match
+# exactly. Users install via:
+#     pip install -e .[cpu] --extra-index-url https://download.pytorch.org/whl/cpu
+cpu = [
+    "torch==2.2.2",
+    "torchaudio==2.2.2",
+]
+
+# --- GPU install (CUDA 12.1). Pinned to the same 2.2.x pair.
+# Users install via:
+#     pip install -e .[gpu] --extra-index-url https://download.pytorch.org/whl/cu121
+gpu = [
+    "torch==2.2.2",
+    "torchaudio==2.2.2",
+]
+
+# --- Test extras.  Split the same way as runtime torch:
+#     test-cpu = just pytest + CPU-runnable tests
+#     test-gpu = pytest + anything needing GPU integration
+test-cpu = [
+    "pytest>=7,<9",
+    "torch==2.2.2",
+    "torchaudio==2.2.2",
+]
+test-gpu = [
+    "pytest>=7,<9",
+    "torch==2.2.2",
+    "torchaudio==2.2.2",
+]
+
+[tool.setuptools.packages.find]
+include = ["brivit*"]
+exclude = ["tests*", "scripts*", "configs*", "runs*", "splits*"]
+
+[tool.pytest.ini_options]
+# Tests are divided into:
+#     unit        — no torch / torchaudio required, CPU-only, always run
+#     integration — needs torch + torchaudio loaded
+#     gpu         — needs a working CUDA device
+# Default command (`pytest -q`) runs only `unit` and `integration` that can
+# load torch. To run everything including GPU bits use `pytest -m ""` or
+# `pytest -m gpu`.
+markers = [
+    "unit: pure-Python tests that do not import torch",
+    "integration: tests that import torch/torchaudio but still run on CPU",
+    "gpu: tests requiring a CUDA device",
+]
+addopts = "-m 'not gpu'"
